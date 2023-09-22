@@ -48,26 +48,6 @@ class LearnIRAccessory extends BroadlinkRMAccessory {
     }
   }
 
-  onMQTTMessage(identifier, message) {
-    const { state, logLevel, log, name } = this;
-
-    if (identifier !== 'unknown' && identifier !== 'command') {
-        log(`\x1b[31m[ERROR] \x1b[0m${name} onMQTTMessage (mqtt message received with unexpected identifier: ${identifier}, ${message.toString()})`);
-
-        return;
-    }
-
-    super.onMQTTMessage(identifier, message);
-
-    let value = this.mqttValuesTemp[identifier];
-    if (logLevel <= 1) { log(`\x1b[34m[DEBUG]\x1b[0m ${name} onMQTTMessage (raw value: ${value})`); }
-    this.performSend(value).catch((err) => {
-      if (logLevel <= 4) {
-        log(`\x1b[31m[ERROR]\x1b[0m Error ${err.message} while sending command with identifier "${identifier}".`);
-      }
-    })
-  }
-
   setupServiceManager() {
     const { data, name, config, serviceManagerType } = this;
     const { on, off } = data || {};

@@ -1,12 +1,24 @@
 const ServiceManagerTypes = require('../helpers/serviceManagerTypes');
-const SwitchAccessory = require('./switch');
+const BroadlinkRMAccessory = require('./accessory');
 const catchDelayCancelError = require('../helpers/catchDelayCancelError');
 const delayForDuration = require('../helpers/delayForDuration');
+const ping = require('../helpers/ping');
+const arp = require('../helpers/arp')
 
-class FanAccessory extends SwitchAccessory {
+class FanAccessory extends BroadlinkRMAccessory {
+  constructor(log, config = {}, serviceManagerType) {
+    super(log, config, serviceManagerType);
+
+    if (!config.isUnitTest) {this.checkPing(ping);}
+  }
+
   setDefaults() {
-    super.setDefaults();
     let { config, state } = this;
+    config.pingFrequency = config.pingFrequency || 1;
+    config.pingGrace = config.pingGrace || 10;
+
+    config.offDuration = config.offDuration || 60;
+    config.onDuration = config.onDuration || 60;
 
     // Defaults
     config.showSwingMode = config.hideSwingMode === true || config.showSwingMode === false ? false : true;
@@ -47,6 +59,11 @@ class FanAccessory extends SwitchAccessory {
       this.autoOnTimeoutPromise = null;
     }
 
+    if (this.pingGraceTimeout) {
+      this.pingGraceTimeout.cancel();
+      this.pingGraceTimeout = null;
+    }
+
     if (this.serviceManager.getCharacteristic(Characteristic.Active) === undefined) {
       this.serviceManager.setCharacteristic(Characteristic.Active, false);
     }
@@ -54,8 +71,65 @@ class FanAccessory extends SwitchAccessory {
 
   checkAutoOnOff() {
     this.reset();
+    this.checkPingGrace();
     this.checkAutoOn();
     this.checkAutoOff();
+  }
+
+  checkPing(ping) {
+    const { config } = this;
+    let { pingIPAddress, pingFrequency, pingUseArp } = config;
+
+    if (!pingIPAddress) {return;}
+
+    // Setup Ping/Arp-based State
+    if(!pingUseArp) {ping(pingIPAddress, pingFrequency, this.pingCallback.bind(this))}
+    else {arp(pingIPAddress, pingFrequency, this.pingCallback.bind(this))}
+  }
+
+  pingCallback(active) {
+    const { config, state, serviceManager } = this;
+
+    if (this.stateChangeInProgress){
+      return;
+    }
+
+    if (config.pingIPAddressStateOnly) {
+      state.switchState = active ? true : false;
+      serviceManager.refreshCharacteristicUI(Characteristic.Active);
+
+      return;
+    }
+
+    const value = active ? true : false;
+    serviceManager.setCharacteristic(Characteristic.Active, value);
+  }
+
+  //async setSwitchState(hexData) {
+  //  const { data, host, log, name, logLevel } = this;
+
+  //  this.stateChangeInProgress = true;
+  //  this.reset();
+
+  //  if (hexData) {await this.performSend(hexData);}
+
+  //  this.checkAutoOnOff();
+  //}
+
+  async checkPingGrace () {
+    await catchDelayCancelError(async () => {
+      const { config, log, name, state, serviceManager } = this;
+
+      let { pingGrace } = config;
+
+      if (pingGrace) {
+
+        this.pingGraceTimeoutPromise = delayForDuration(pingGrace);
+        await this.pingGraceTimeoutPromise;
+
+        this.stateChangeInProgress = false;
+      }
+    });
   }
 
   async checkAutoOff() {
@@ -92,7 +166,7 @@ class FanAccessory extends SwitchAccessory {
 
   async setSwitchState(hexData, previousValue) {
     const { config, state, serviceManager } = this;
-    if (!this.state.switchState) {
+    if (!state.switchState) {
       this.lastFanSpeed = undefined;
     }
 
@@ -101,12 +175,14 @@ class FanAccessory extends SwitchAccessory {
     }
 
     // Reset the fan speed back to the default speed when turned off
-    if (this.state.switchState === false && config.alwaysResetToDefaults) {
+    if (!state.switchState && config.alwaysResetToDefaults) {
       this.setDefaults();
       serviceManager.setCharacteristic(Characteristic.RotationSpeed, state.fanSpeed);
     }
 
-    super.setSwitchState(hexData, previousValue);
+    this.reset();
+
+    if (hexData) {await this.performSend(hexData);}
   }
 
   async setFanSpeed(hexData) {
@@ -115,16 +191,13 @@ class FanAccessory extends SwitchAccessory {
     this.reset();
 
     // Create an array of speeds specified in the data config
-    const foundSpeeds = [];
-    const allHexKeys = Object.keys(data || {});
-
-    allHexKeys.forEach((key) => {
-      const parts = key.split('fanSpeed');
-
-      if (parts.length !== 2) {return;}
-
-      foundSpeeds.push(parts[1])
-    })
+    const foundSpeeds = Object.keys(data || {}).reduce((accu, key) => {
+      const match = key.match(/fanSpeed(\d+)/);
+      if (match && match[1]) {
+        accu.push(match[1]);
+      }
+      return accu;
+    }, []);
 
     if (config.speedCycle && config.speedSteps) {
       for (let i = 1; i <= config.speedSteps; i++) {
